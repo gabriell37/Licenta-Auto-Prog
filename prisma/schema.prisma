@@ -1,0 +1,606 @@
+// AutoProg data model.
+// Dev provider: SQLite (runs with zero external services).
+// Production target: PostgreSQL 16 — change `provider` + `DATABASE_URL`, then add RLS policies.
+// Money is stored as INTEGER `bani` (1 RON = 100 bani). Never floats.
+// "Enum" fields are String with documented allowed values, enforced by Zod/TS unions in app code
+// (SQLite has no native enums). See src/lib/enums.ts.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ----------------------------------------------------------------------------
+// Identity & access
+// ----------------------------------------------------------------------------
+model User {
+  id            String   @id @default(cuid())
+  email         String   @unique
+  phone         String?
+  passwordHash  String
+  name          String
+  avatarUrl     String?
+  role          String   @default("CUSTOMER") // CUSTOMER | STAFF | ADMIN
+  locale        String   @default("ro")
+  emailVerified DateTime?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  memberships   Membership[]
+  vehicles      Vehicle[]
+  appointments  Appointment[]
+  reviews       Review[]
+  favorites     Favorite[]
+  notifications Notification[]
+  consents      ConsentRecord[]
+  giftCards     GiftCard[]      @relation("GiftCardPurchaser")
+  payments      Payment[]
+  messages      Message[]
+  problemLogs   ProblemLog[]
+  uploadedMedia Media[]         @relation("MediaUploader")
+  auditLogs     AuditLog[]
+}
+
+model Membership {
+  id             String  @id @default(cuid())
+  userId         String
+  shopId         String
+  role           String  @default("MECHANIC") // OWNER | MANAGER | ADVISOR | MECHANIC
+  title          String?
+  skills         String  @default("[]") // JSON string[]
+  commissionRate Float   @default(0)
+  active         Boolean @default(true)
+  createdAt      DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  shop Shop @relation(fields: [shopId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, shopId])
+  @@index([shopId])
+}
+
+model ConsentRecord {
+  id        String   @id @default(cuid())
+  userId    String
+  type      String // MARKETING_EMAIL | MARKETING_SMS | TERMS | PRIVACY
+  granted   Boolean
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// ----------------------------------------------------------------------------
+// Business (tenant) & catalog
+// ----------------------------------------------------------------------------
+model Shop {
+  id             String  @id @default(cuid())
+  slug           String  @unique
+  name           String
+  legalName      String?
+  cui            String? // RO fiscal code
+  description    String?
+  logoUrl        String?
+  coverUrl       String?
+  status         String  @default("DRAFT") // DRAFT | PENDING | VERIFIED | SUSPENDED
+  primaryCategory String @default("repair")
+  ratingAvg      Float   @default(0)
+  ratingCount    Int     @default(0)
+  phone          String?
+  email          String?
+  addressLine    String?
+  locality       String?
+  county         String?
+  postalCode     String?
+  lat            Float?
+  lng            Float?
+  openingHours   String  @default("[]")  // JSON: [{day,open,close}]
+  amenities      String  @default("[]")  // JSON: string[]
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  memberships  Membership[]
+  services     Service[]
+  resources    Resource[]
+  appointments Appointment[]
+  reviews      Review[]
+  inventory    InventoryItem[]
+  suppliers    Supplier[]
+  estimates    Estimate[]
+  workOrders   WorkOrder[]
+  invoices     Invoice[]
+  payments     Payment[]
+  giftCards    GiftCard[]
+  favorites    Favorite[]
+  subscription Subscription?
+
+  @@index([status])
+  @@index([primaryCategory])
+  @@index([county])
+}
+
+model Category {
+  id        String  @id @default(cuid())
+  slug      String  @unique
+  nameRo    String
+  nameEn    String
+  icon      String  @default("wrench")
+  sortOrder Int     @default(0)
+  parentId  String?
+
+  parent   Category?  @relation("CategoryTree", fields: [parentId], references: [id])
+  children Category[] @relation("CategoryTree")
+  services Service[]
+}
+
+model Service {
+  id           String  @id @default(cuid())
+  shopId       String
+  categoryId   String?
+  name         String
+  description  String?
+  durationMin  Int     @default(60)
+  priceFromBani Int    @default(0)
+  priceType    String  @default("FROM") // FIXED | FROM | QUOTE
+  vehicleClass String?  // any | passenger | suv | van | truck | ev
+  active       Boolean @default(true)
+  sortOrder    Int     @default(0)
+
+  shop     Shop      @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  category Category? @relation(fields: [categoryId], references: [id])
+  items    AppointmentItem[]
+
+  @@index([shopId])
+  @@index([categoryId])
+}
+
+model Resource {
+  id           String  @id @default(cuid())
+  shopId       String
+  name         String
+  type         String  @default("BAY") // BAY | LIFT | RAMP | ALIGNMENT | PAINT | WASH | MECHANIC
+  capabilities String  @default("[]")  // JSON string[]
+  active       Boolean @default(true)
+  sortOrder    Int     @default(0)
+
+  shop         Shop          @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  appointments Appointment[]
+
+  @@index([shopId])
+}
+
+// ----------------------------------------------------------------------------
+// Consumer: vehicles, documents, problem log, favorites
+// ----------------------------------------------------------------------------
+model Vehicle {
+  id        String  @id @default(cuid())
+  userId    String
+  make      String
+  model     String
+  year      Int?
+  vin       String?
+  plate     String?
+  engine    String?
+  fuel      String? // petrol | diesel | hybrid | ev | lpg
+  mileage   Int?
+  color     String?
+  nickname  String?
+  photoUrl  String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  appointments Appointment[]
+  documents    VehicleDocument[]
+  problemLogs  ProblemLog[]
+  media        Media[]
+  estimates    Estimate[]
+  workOrders   WorkOrder[]
+
+  @@index([userId])
+}
+
+model VehicleDocument {
+  id        String   @id @default(cuid())
+  vehicleId String
+  type      String // ITP | RCA | REGISTRATION | ROVINIETA | OTHER
+  url       String?
+  number    String?
+  expiresAt DateTime?
+  createdAt DateTime @default(now())
+
+  vehicle Vehicle @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+
+  @@index([vehicleId])
+}
+
+model ProblemLog {
+  id            String   @id @default(cuid())
+  vehicleId     String
+  userId        String
+  appointmentId String?
+  text          String
+  resolved      Boolean  @default(false)
+  createdAt     DateTime @default(now())
+
+  vehicle     Vehicle      @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  appointment Appointment? @relation(fields: [appointmentId], references: [id], onDelete: SetNull)
+
+  @@index([vehicleId])
+}
+
+model Favorite {
+  id        String   @id @default(cuid())
+  userId    String
+  shopId    String
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  shop Shop @relation(fields: [shopId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, shopId])
+  @@index([shopId])
+}
+
+// ----------------------------------------------------------------------------
+// Booking
+// ----------------------------------------------------------------------------
+model Appointment {
+  id         String   @id @default(cuid())
+  shopId     String
+  userId     String
+  vehicleId  String?
+  resourceId String?
+  staffId    String?
+  startAt    DateTime
+  endAt      DateTime
+  status     String   @default("REQUESTED")
+  // REQUESTED | CONFIRMED | RECEIVED | DIAGNOSING | AWAITING_APPROVAL | IN_PROGRESS | READY | DELIVERED | CANCELLED | NO_SHOW
+  mode       String   @default("DROP_OFF") // DROP_OFF | WAIT
+  problemText String?
+  estimateBani Int?
+  readyByAt  DateTime?
+  source     String   @default("web") // web | mobile | walkin | google | facebook
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  shop       Shop      @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  vehicle    Vehicle?  @relation(fields: [vehicleId], references: [id], onDelete: SetNull)
+  resource   Resource? @relation(fields: [resourceId], references: [id], onDelete: SetNull)
+  items      AppointmentItem[]
+  media      Media[]
+  messages   Message[]
+  review     Review?
+  estimate   Estimate?
+  workOrder  WorkOrder?
+  payments   Payment[]
+  invoice    Invoice?
+  problemLogs ProblemLog[]
+
+  @@index([shopId, startAt])
+  @@index([userId])
+  @@index([status])
+}
+
+model AppointmentItem {
+  id            String @id @default(cuid())
+  appointmentId String
+  serviceId     String?
+  name          String
+  priceBani     Int    @default(0)
+  durationMin   Int    @default(60)
+  qty           Int    @default(1)
+
+  appointment Appointment @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
+  service     Service?    @relation(fields: [serviceId], references: [id], onDelete: SetNull)
+
+  @@index([appointmentId])
+}
+
+// ----------------------------------------------------------------------------
+// Media (photo / video / audio) — attachable to appointment, vehicle, DVI item
+// ----------------------------------------------------------------------------
+model Media {
+  id            String  @id @default(cuid())
+  uploaderId    String
+  appointmentId String?
+  vehicleId     String?
+  workOrderId   String?
+  dviItemId     String?
+  kind          String  // IMAGE | VIDEO | AUDIO
+  url           String
+  thumbUrl      String?
+  mimeType      String?
+  sizeBytes     Int     @default(0)
+  durationSec   Int?
+  caption       String?
+  createdAt     DateTime @default(now())
+
+  uploader    User         @relation("MediaUploader", fields: [uploaderId], references: [id], onDelete: Cascade)
+  appointment Appointment? @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
+  vehicle     Vehicle?     @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+  workOrder   WorkOrder?   @relation(fields: [workOrderId], references: [id], onDelete: Cascade)
+  dviItem     DviItem?     @relation(fields: [dviItemId], references: [id], onDelete: Cascade)
+
+  @@index([appointmentId])
+  @@index([vehicleId])
+}
+
+model Message {
+  id            String   @id @default(cuid())
+  appointmentId String
+  senderId      String
+  body          String
+  createdAt     DateTime @default(now())
+  readAt        DateTime?
+
+  appointment Appointment @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
+  sender      User        @relation(fields: [senderId], references: [id], onDelete: Cascade)
+
+  @@index([appointmentId])
+}
+
+// ----------------------------------------------------------------------------
+// Estimates (deviz), work orders, DVI
+// ----------------------------------------------------------------------------
+model Estimate {
+  id            String   @id @default(cuid())
+  shopId        String
+  appointmentId String?  @unique
+  vehicleId     String?
+  number        String
+  status        String   @default("DRAFT") // DRAFT | SENT | APPROVED | REJECTED | EXPIRED
+  subtotalBani  Int      @default(0)
+  taxBani       Int      @default(0)
+  totalBani     Int      @default(0)
+  note          String?
+  approvedAt    DateTime?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  shop        Shop         @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  appointment Appointment? @relation(fields: [appointmentId], references: [id], onDelete: SetNull)
+  vehicle     Vehicle?     @relation(fields: [vehicleId], references: [id], onDelete: SetNull)
+  lines       EstimateLine[]
+
+  @@unique([shopId, number])
+  @@index([shopId])
+}
+
+model EstimateLine {
+  id           String @id @default(cuid())
+  estimateId   String
+  kind         String @default("LABOR") // LABOR | PART | SUBLET
+  description  String
+  qty          Float  @default(1)
+  unitPriceBani Int   @default(0)
+  totalBani    Int    @default(0)
+
+  estimate Estimate @relation(fields: [estimateId], references: [id], onDelete: Cascade)
+
+  @@index([estimateId])
+}
+
+model WorkOrder {
+  id            String   @id @default(cuid())
+  shopId        String
+  appointmentId String   @unique
+  vehicleId     String?
+  number        String
+  status        String   @default("OPEN") // OPEN | IN_PROGRESS | QC | CLOSED
+  mileageIn     Int?
+  fuelLevel     Int? // 0-100
+  intakeNotes   String?
+  openedAt      DateTime @default(now())
+  closedAt      DateTime?
+
+  shop        Shop        @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  appointment Appointment @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
+  vehicle     Vehicle?    @relation(fields: [vehicleId], references: [id], onDelete: SetNull)
+  dvi         DviReport?
+  media       Media[]
+
+  @@unique([shopId, number])
+  @@index([shopId])
+}
+
+model DviReport {
+  id          String   @id @default(cuid())
+  workOrderId String   @unique
+  shopId      String
+  status      String   @default("DRAFT") // DRAFT | SENT | REVIEWED
+  createdAt   DateTime @default(now())
+
+  workOrder WorkOrder @relation(fields: [workOrderId], references: [id], onDelete: Cascade)
+  items     DviItem[]
+}
+
+model DviItem {
+  id          String  @id @default(cuid())
+  dviReportId String
+  name        String
+  severity    String  @default("OK") // OK | ADVISE | URGENT
+  note        String?
+  measurement String?
+
+  dviReport DviReport @relation(fields: [dviReportId], references: [id], onDelete: Cascade)
+  media     Media[]
+
+  @@index([dviReportId])
+}
+
+// ----------------------------------------------------------------------------
+// Reviews
+// ----------------------------------------------------------------------------
+model Review {
+  id              String   @id @default(cuid())
+  shopId          String
+  userId          String
+  appointmentId   String   @unique
+  rating          Int
+  ratingPrice     Int?
+  ratingQuality   Int?
+  ratingTimeliness Int?
+  ratingComms     Int?
+  body            String?
+  reply           String?
+  replyAt         DateTime?
+  status          String   @default("PUBLISHED") // PUBLISHED | PENDING | HIDDEN
+  createdAt       DateTime @default(now())
+
+  shop        Shop        @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  appointment Appointment @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
+
+  @@index([shopId])
+}
+
+// ----------------------------------------------------------------------------
+// Inventory & suppliers
+// ----------------------------------------------------------------------------
+model InventoryItem {
+  id        String  @id @default(cuid())
+  shopId    String
+  sku       String?
+  name      String
+  brand     String?
+  category  String?
+  qtyOnHand Int     @default(0)
+  minQty    Int     @default(0)
+  costBani  Int     @default(0)
+  priceBani Int     @default(0)
+  location  String?
+  active    Boolean @default(true)
+
+  shop Shop @relation(fields: [shopId], references: [id], onDelete: Cascade)
+
+  @@index([shopId])
+}
+
+model Supplier {
+  id     String  @id @default(cuid())
+  shopId String
+  name   String
+  email  String?
+  phone  String?
+
+  shop Shop @relation(fields: [shopId], references: [id], onDelete: Cascade)
+
+  @@index([shopId])
+}
+
+// ----------------------------------------------------------------------------
+// Money: invoices, payments, gift cards
+// ----------------------------------------------------------------------------
+model Invoice {
+  id            String   @id @default(cuid())
+  shopId        String
+  appointmentId String?  @unique
+  userId        String?
+  number        String
+  status        String   @default("DRAFT") // DRAFT | ISSUED | PAID | VOID
+  subtotalBani  Int      @default(0)
+  vatBani       Int      @default(0)
+  totalBani     Int      @default(0)
+  fiscalReceiptNo String?
+  eFacturaStatus String  @default("NONE") // NONE | QUEUED | SENT | ACCEPTED | ERROR
+  issuedAt      DateTime?
+  createdAt     DateTime @default(now())
+
+  shop        Shop         @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  appointment Appointment? @relation(fields: [appointmentId], references: [id], onDelete: SetNull)
+
+  @@unique([shopId, number])
+  @@index([shopId])
+}
+
+model Payment {
+  id            String   @id @default(cuid())
+  shopId        String?
+  appointmentId String?
+  userId        String?
+  amountBani    Int
+  method        String   @default("CARD") // CARD | CASH | GIFT_CARD | TRANSFER
+  kind          String   @default("DEPOSIT") // DEPOSIT | FINAL | REFUND
+  status        String   @default("SUCCEEDED") // PENDING | SUCCEEDED | FAILED | REFUNDED
+  providerRef   String?
+  createdAt     DateTime @default(now())
+
+  shop        Shop?        @relation(fields: [shopId], references: [id], onDelete: SetNull)
+  appointment Appointment? @relation(fields: [appointmentId], references: [id], onDelete: SetNull)
+  user        User?        @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([appointmentId])
+}
+
+model GiftCard {
+  id          String   @id @default(cuid())
+  code        String   @unique
+  shopId      String?
+  purchaserId String?
+  kind        String   @default("PLATFORM") // PLATFORM | OWN
+  initialBani Int
+  balanceBani Int
+  status      String   @default("ACTIVE") // ACTIVE | REDEEMED | EXPIRED | VOID
+  createdAt   DateTime @default(now())
+
+  shop      Shop? @relation(fields: [shopId], references: [id], onDelete: SetNull)
+  purchaser User? @relation("GiftCardPurchaser", fields: [purchaserId], references: [id], onDelete: SetNull)
+}
+
+model Subscription {
+  id          String   @id @default(cuid())
+  shopId      String   @unique
+  plan        String   @default("MERO") // MERO | PRO_PLUS
+  status      String   @default("TRIALING") // TRIALING | ACTIVE | PAST_DUE | CANCELLED
+  extraSeats  Int      @default(0)
+  trialEndsAt DateTime?
+  createdAt   DateTime @default(now())
+
+  shop Shop @relation(fields: [shopId], references: [id], onDelete: Cascade)
+}
+
+// ----------------------------------------------------------------------------
+// Notifications, audit
+// ----------------------------------------------------------------------------
+model Notification {
+  id           String   @id @default(cuid())
+  userId       String
+  channel      String   @default("inapp") // inapp | email | sms | push
+  type         String
+  title        String
+  body         String?
+  data         String   @default("{}") // JSON
+  status       String   @default("PENDING") // PENDING | SENT | FAILED | READ
+  scheduledFor DateTime?
+  sentAt       DateTime?
+  readAt       DateTime?
+  createdAt    DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([status, scheduledFor])
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  actorId   String?
+  shopId    String?
+  action    String
+  entity    String?
+  entityId  String?
+  meta      String   @default("{}")
+  createdAt DateTime @default(now())
+
+  actor User? @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([shopId, createdAt])
+}
